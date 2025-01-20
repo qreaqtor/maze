@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"container/heap"
 	"fmt"
-	"iter"
+	priorityqueue "maze/priorityQueue"
 	"os"
 	"strconv"
 	"text/template"
@@ -13,16 +13,26 @@ import (
 const (
 	numberRangeErrText = "expected number should be in the range from 0 to 9, but was {{.}}\n"
 	numberTypeErrText  = "expected value to be int, but was {{.}}\n"
+
+	noPathText = "no paths found"
+
+	badStartInput = "the start coordinate should not be a wall (0 value in maze)"
+	badEndInput   = "the end coordinate should not be a wall (0 value in maze)"
 )
 
 var (
 	numberRangeErrTemp, numberTypeErrTemp *template.Template
 
-	inputReader               *bufio.Reader
-	outputWriter, errorWriter *bufio.Writer
+	inputReader  *bufio.Reader
+	outputWriter *bufio.Writer
 )
 
-const defaultErrExitCode = 1
+const (
+	badInputExitCode = 1
+	badTypeExitCode  = 2
+
+	noPathExitCode = 3
+)
 
 type point struct {
 	X, Y int
@@ -34,7 +44,6 @@ func init() {
 
 	inputReader = bufio.NewReader(os.Stdin)
 	outputWriter = bufio.NewWriter(os.Stdout)
-	errorWriter = bufio.NewWriter(os.Stderr)
 }
 
 func main() {
@@ -46,7 +55,15 @@ func main() {
 	var start, end point
 	fmt.Fscan(inputReader, &start.X, &start.Y, &end.X, &end.Y)
 
-	for current := range findPath(maze, start, end) {
+	if maze[start.X][start.Y] == 0 {
+		fmt.Fprintln(os.Stderr, badStartInput)
+		os.Exit(badInputExitCode)
+	} else if maze[end.X][end.Y] == 0 {
+		fmt.Fprintln(os.Stderr, badEndInput)
+		os.Exit(badInputExitCode)
+	}
+
+	for _, current := range findShortestPath(maze, start, end) {
 		fmt.Fprintln(outputWriter, current.X, current.Y)
 	}
 	fmt.Fprintln(outputWriter, ".")
@@ -66,12 +83,12 @@ func readMaze(n, m int) [][]int {
 
 			number, err := strconv.Atoi(rawNumber)
 			if err != nil {
-				numberTypeErrTemp.Execute(errorWriter, rawNumber)
-				os.Exit(defaultErrExitCode)
+				numberTypeErrTemp.Execute(os.Stderr, rawNumber)
+				os.Exit(badTypeExitCode)
 			}
 			if number < 0 || number > 9 {
-				numberRangeErrTemp.Execute(errorWriter, number)
-				os.Exit(defaultErrExitCode)
+				numberRangeErrTemp.Execute(os.Stderr, number)
+				os.Exit(badInputExitCode)
 			}
 
 			maze[i][j] = int(number)
@@ -81,25 +98,27 @@ func readMaze(n, m int) [][]int {
 	return maze
 }
 
-func findPath(maze [][]int, start, end point) iter.Seq[point] {
-	pq := new(PriorityQueue[point])
-	heap.Push(pq, NewItem(start, 0))
+var moves = []point{
+	{-1, 0},
+	{0, -1},
+	{1, 0},
+	{0, 1},
+}
 
-	cameFrom := make(map[point]point)
-	cameFrom[start] = point{-1, -1}
-
-	costs := make(map[point]int)
-	costs[start] = 0
-
+func findShortestPath(maze [][]int, start, end point) []point {
+	minPathLength := calculateDistance(start, end)
 	n, m := len(maze), len(maze[0])
 
-	heap.Init(pq)
-	for pq.Len() != 0 {
-		item, ok := pq.Pop().(*Item[point])
-		if !ok {
-			os.Exit(defaultErrExitCode)
-		}
-		current := item.value
+	cameFrom := make(map[point]point, minPathLength)
+
+	costs := make(map[point]int, minPathLength)
+	costs[start] = 0
+
+	pointsPQ := priorityqueue.NewPriorityQueue[point](minPathLength)
+	heap.Push(pointsPQ, priorityqueue.NewItem(start, 0))
+
+	for pointsPQ.Len() != 0 {
+		current := heap.Pop(pointsPQ).(*priorityqueue.Item[point]).Value
 
 		if current.X == end.X && current.Y == end.Y {
 			break
@@ -115,35 +134,34 @@ func findPath(maze [][]int, start, end point) iter.Seq[point] {
 
 			cost := costs[current] + maze[next.X][next.Y]
 
-			if v, ok := costs[next]; !ok || cost < v {
+			if prevCost, ok := costs[next]; !ok || cost < prevCost {
 				costs[next] = cost
-				priority := cost + calculateCost(next, end)
-				heap.Push(pq, NewItem(next, cost+priority))
+				priority := cost + calculateDistance(next, end)
+				heap.Push(pointsPQ, priorityqueue.NewItem(next, priority))
 				cameFrom[next] = current
 			}
 		}
 	}
 
-	return func(yield func(point) bool) {
-		from := end
-		for {
-			next, ok := cameFrom[from]
-			if !(ok && yield(from)) {
-				return
-			}
-			from = next
-		}
+	if _, ok := cameFrom[end]; !ok {
+		fmt.Fprintln(os.Stderr, noPathText)
+		os.Exit(noPathExitCode)
 	}
+
+	return recoverPath(cameFrom, start, end, 0)
 }
 
-var moves = []point{
-	point{-1, 0},
-	point{0, -1},
-	point{1, 0},
-	point{0, 1},
+func recoverPath(cameFrom map[point]point, start, end point, depth int) []point {
+	if start == end {
+		path := make([]point, 0, depth+1)
+		return append(path, end)
+	}
+
+	path := recoverPath(cameFrom, start, cameFrom[end], depth+1)
+	return append(path, end)
 }
 
-func calculateCost(from, to point) int {
+func calculateDistance(from, to point) int {
 	return abs(from.X-to.X) + abs(from.Y-to.Y)
 }
 
@@ -152,42 +170,4 @@ func abs(x int) int {
 		return -x
 	}
 	return x
-}
-
-type Item[T any] struct {
-	value    T   // The value of the item; arbitrary.
-	priority int // The priority of the item in the queue.
-}
-
-func NewItem[T any](value T, priority int) *Item[T] {
-	return &Item[T]{
-		value:    value,
-		priority: priority,
-	}
-}
-
-type PriorityQueue[T any] []*Item[T]
-
-func (pq PriorityQueue[T]) Len() int { return len(pq) }
-
-func (pq PriorityQueue[T]) Less(i, j int) bool {
-	return pq[i].priority < pq[j].priority
-}
-
-func (pq PriorityQueue[T]) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-}
-
-func (pq *PriorityQueue[T]) Push(x any) {
-	item := x.(*Item[T])
-	*pq = append(*pq, item)
-}
-
-func (pq *PriorityQueue[T]) Pop() any {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil
-	*pq = old[0 : n-1]
-	return item
 }
